@@ -1,0 +1,2 @@
+Шрифты внутри приложения (урезаны до русских и латинских букв):
+Inter (SIL Open Font License 1.1), Carlito (SIL OFL 1.1), DejaVu Serif и DejaVu Sans Mono (свободная лицензия Bitstream Vera / DejaVu).

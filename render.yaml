@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: chat-chat
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DEV_CODES
+        value: "0"
+      - key: SMTP_URL
+        sync: false
+      - key: MAIL_FROM
+        sync: false
