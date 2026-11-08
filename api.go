@@ -31,10 +31,11 @@ const (
 var (
 	devCodes             bool
 	smtpURL, mailFrom    string
+	brevoKey             string
 	twSID, twTok, twFrom string
 )
 
-func canEmail() bool { return smtpURL != "" }
+func canEmail() bool { return smtpURL != "" || brevoKey != "" }
 func canSms() bool   { return twSID != "" && twTok != "" && twFrom != "" }
 
 /* ───── ошибки ───── */
@@ -98,7 +99,8 @@ var (
 	reUser     = regexp.MustCompile(`^[a-z][a-z0-9_]{4,31}$`)
 	reEmojiNm  = regexp.MustCompile(`^[a-z0-9_]{2,24}$`)
 	reDataURL  = regexp.MustCompile(`^data:image/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=]+)$`)
-	reFile     = regexp.MustCompile(`^[a-f0-9]{32}\.(png|jpg|webp|gif)$`)
+	reFile     = regexp.MustCompile(`^[a-f0-9]{32}\.(png|jpg|webp|gif|webm|ogg|m4a|mp3|wav)$`)
+	reAudio    = regexp.MustCompile(`^data:audio/(webm|ogg|mp4|mpeg|wav|x-m4a|aac)(?:;codecs=[A-Za-z0-9.,-]+)?;base64,([A-Za-z0-9+/=]+)$`)
 	reWord     = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 	reHex      = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 	reCode     = regexp.MustCompile(`^\d{6}$`)
@@ -224,6 +226,52 @@ func saveImage(data any) string {
 	}
 	return name
 }
+func saveAudio(data any) string {
+	s, _ := data.(string)
+	m := reAudio.FindStringSubmatch(s)
+	if m == nil {
+		bad("bad_audio", "Не удалось разобрать голосовое сообщение.")
+	}
+	buf, err := base64.StdEncoding.DecodeString(m[2])
+	if err != nil || len(buf) < 100 || len(buf) > 900*1024 {
+		bad("audio_too_big", "Голосовое слишком длинное. Запишите покороче.")
+	}
+	ext, ok := "", false
+	switch m[1] {
+	case "webm":
+		ext, ok = "webm", bytes.HasPrefix(buf, []byte{0x1a, 0x45, 0xdf, 0xa3})
+	case "ogg":
+		ext, ok = "ogg", bytes.HasPrefix(buf, []byte("OggS"))
+	case "mp4", "x-m4a", "aac":
+		ext, ok = "m4a", len(buf) > 12 && string(buf[4:8]) == "ftyp"
+	case "mpeg":
+		ext, ok = "mp3", bytes.HasPrefix(buf, []byte("ID3")) || (buf[0] == 0xff && buf[1]&0xe0 == 0xe0)
+	case "wav":
+		ext, ok = "wav", string(buf[:4]) == "RIFF" && string(buf[8:12]) == "WAVE"
+	}
+	if !ok {
+		bad("bad_audio", "Файл не похож на аудио.")
+	}
+	name := randHex(16) + "." + ext
+	if err := os.WriteFile(filepath.Join(uploadDir, name), buf, 0o600); err != nil {
+		fail(500, "server_error", "Ошибка сервера.")
+	}
+	return name
+}
+func copyUpload(name string) string {
+	if !reFile.MatchString(name) {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(uploadDir, name))
+	if err != nil {
+		return ""
+	}
+	nn := randHex(16) + name[strings.LastIndex(name, "."):]
+	if os.WriteFile(filepath.Join(uploadDir, nn), b, 0o600) != nil {
+		return ""
+	}
+	return nn
+}
 func rmFile(name string) {
 	if reFile.MatchString(name) {
 		_ = os.Remove(filepath.Join(uploadDir, name))
@@ -259,24 +307,41 @@ type SelfUser struct {
 	Phone    *string        `json:"phone"`
 	Settings map[string]any `json:"settings"`
 }
+type ReplyView struct {
+	ID     int    `json:"id"`
+	UserID int    `json:"userId"`
+	Kind   string `json:"kind"`
+	Text   string `json:"text"`
+}
 type MsgView struct {
-	ID        int    `json:"id"`
-	ChatID    int    `json:"chatId"`
-	UserID    int    `json:"userId"`
-	Kind      string `json:"kind"`
-	Text      string `json:"text"`
-	EmojiID   *int   `json:"emojiId"`
-	CreatedAt int64  `json:"createdAt"`
+	ID        int              `json:"id"`
+	ChatID    int              `json:"chatId"`
+	UserID    int              `json:"userId"`
+	Kind      string           `json:"kind"`
+	Text      string           `json:"text"`
+	EmojiID   *int             `json:"emojiId"`
+	CreatedAt int64            `json:"createdAt"`
+	ReplyTo   *ReplyView       `json:"replyTo"`
+	EditedAt  int64            `json:"editedAt"`
+	Image     *string          `json:"image"`
+	Reactions map[string][]int `json:"reactions"`
+	Audio     *string          `json:"audio"`
+	AudioMs   int              `json:"audioMs"`
+	FwdFrom   *int             `json:"fwdFrom"`
 }
 type ChatView struct {
-	ID        int      `json:"id"`
-	Type      string   `json:"type"`
-	Title     *string  `json:"title"`
-	CreatedBy int      `json:"createdBy"`
-	Members   []int    `json:"members"`
-	Last      *MsgView `json:"last"`
-	Unread    int      `json:"unread"`
-	CreatedAt int64    `json:"createdAt"`
+	ID        int            `json:"id"`
+	Type      string         `json:"type"`
+	Title     *string        `json:"title"`
+	CreatedBy int            `json:"createdBy"`
+	Members   []int          `json:"members"`
+	Last      *MsgView       `json:"last"`
+	Unread    int            `json:"unread"`
+	CreatedAt int64          `json:"createdAt"`
+	Reads     map[string]int `json:"reads"`
+	Avatar    *string        `json:"avatar"`
+	Pinned    bool           `json:"pinned"`
+	Muted     bool           `json:"muted"`
 }
 
 func publicUser(u *User) PubUser {
@@ -290,10 +355,29 @@ func selfUser(u *User) SelfUser {
 	return SelfUser{publicUser(u), nstr(u.Email), nstr(u.Phone), st}
 }
 func msgView(m *Message) *MsgView {
-	v := &MsgView{m.ID, m.ChatID, m.UserID, m.Kind, m.Text, nil, m.CreatedAt}
+	v := &MsgView{ID: m.ID, ChatID: m.ChatID, UserID: m.UserID, Kind: m.Kind, Text: m.Text, CreatedAt: m.CreatedAt, EditedAt: m.EditedAt, Image: fileURL(m.Image), Reactions: m.Reactions, Audio: fileURL(m.Audio), AudioMs: m.AudioMs}
+	if m.FwdFrom != 0 {
+		f := m.FwdFrom
+		v.FwdFrom = &f
+	}
+	if v.Reactions == nil {
+		v.Reactions = map[string][]int{}
+	}
 	if m.EmojiID != 0 {
 		e := m.EmojiID
 		v.EmojiID = &e
+	}
+	if m.ReplyTo != 0 {
+		for _, x := range msgsBy[m.ChatID] {
+			if x.ID == m.ReplyTo {
+				t := []rune(x.Text)
+				if len(t) > 80 {
+					t = append(t[:80], '…')
+				}
+				v.ReplyTo = &ReplyView{x.ID, x.UserID, x.Kind, string(t)}
+				break
+			}
+		}
 	}
 	return v
 }
@@ -302,7 +386,12 @@ func chatView(chatID, forUser int) *ChatView {
 	if c == nil {
 		return nil
 	}
-	v := &ChatView{ID: c.ID, Type: c.Type, CreatedBy: c.CreatedBy, Members: memberIDs(chatID), CreatedAt: c.CreatedAt}
+	v := &ChatView{ID: c.ID, Type: c.Type, CreatedBy: c.CreatedBy, Members: memberIDs(chatID), CreatedAt: c.CreatedAt, Reads: map[string]int{}}
+	for _, m := range db.Members {
+		if m.ChatID == chatID {
+			v.Reads[strconv.Itoa(m.UserID)] = m.LastRead
+		}
+	}
 	if c.Type == "group" {
 		t := c.Title
 		v.Title = &t
@@ -312,8 +401,10 @@ func chatView(chatID, forUser int) *ChatView {
 		v.Last = msgView(list[len(list)-1])
 	}
 	lr := 0
+	v.Avatar = fileURL(c.Avatar)
 	if m := memberRow(chatID, forUser); m != nil {
 		lr = m.LastRead
+		v.Pinned, v.Muted = m.Pinned, m.Muted
 	}
 	for i := len(list) - 1; i >= 0 && list[i].ID > lr; i-- {
 		if list[i].UserID != forUser {
@@ -754,7 +845,12 @@ func init() {
 			}
 			return v.CreatedAt
 		}
-		sort.SliceStable(chats, func(i, j int) bool { return ts(chats[i]) > ts(chats[j]) })
+		sort.SliceStable(chats, func(i, j int) bool {
+			if chats[i].Pinned != chats[j].Pinned {
+				return chats[i].Pinned
+			}
+			return ts(chats[i]) > ts(chats[j])
+		})
 		return map[string]any{"chats": chats, "users": usersFor(all)}
 	})
 	route("POST", "/api/chats", createChat)
@@ -863,21 +959,68 @@ func init() {
 		}
 		limit("m:"+strconv.Itoa(me), 60, 60e3)
 		m := &Message{ChatID: id, UserID: me, Kind: "text", CreatedAt: now()}
-		if v, has := c.body["emojiId"]; has && v != nil {
+		if v, has := c.body["replyTo"]; has && v != nil {
+			rid := intParam(v)
+			found := false
+			for _, x := range msgsBy[id] {
+				if x.ID == rid {
+					found = true
+				}
+			}
+			if !found {
+				bad("bad_reply", "Сообщение, на которое вы отвечаете, не найдено.")
+			}
+			m.ReplyTo = rid
+		}
+		cleanText := func() string {
+			t := strings.TrimSpace(strings.ReplaceAll(c.str("text"), "\x00", ""))
+			if r := []rune(t); len(r) > 2000 {
+				t = strings.TrimSpace(string(r[:2000]))
+			}
+			return t
+		}
+		if v, has := c.body["forward"]; has && v != nil {
+			src := messageByID(intParam(v))
+			if src == nil || !isMember(src.ChatID, me) {
+				fail(404, "not_found", "Сообщение не найдено.")
+			}
+			m.Kind, m.Text, m.EmojiID, m.AudioMs, m.ReplyTo = src.Kind, src.Text, src.EmojiID, src.AudioMs, 0
+			if src.Image != "" {
+				m.Image = copyUpload(src.Image)
+			}
+			if src.Audio != "" {
+				m.Audio = copyUpload(src.Audio)
+			}
+			m.FwdFrom = src.UserID
+			if src.FwdFrom != 0 {
+				m.FwdFrom = src.FwdFrom
+			}
+		} else if v, has := c.body["emojiId"]; has && v != nil {
 			m.EmojiID = intParam(v)
 			if emojiByID(m.EmojiID) == nil {
 				bad("no_emoji", "Такого смайлика нет.")
 			}
 			m.Kind = "sticker"
-		} else {
-			t := strings.TrimSpace(strings.ReplaceAll(c.str("text"), "\x00", ""))
-			if r := []rune(t); len(r) > 2000 {
-				t = strings.TrimSpace(string(r[:2000]))
+		} else if v, has := c.body["audio"]; has && v != nil {
+			m.Audio = saveAudio(v)
+			m.Kind = "voice"
+			ms, _ := toInt(c.body["duration"])
+			if ms < 0 {
+				ms = 0
 			}
-			if t == "" {
+			if ms > 600000 {
+				ms = 600000
+			}
+			m.AudioMs = ms
+		} else if v, has := c.body["image"]; has && v != nil {
+			m.Image = saveImage(v)
+			m.Kind = "image"
+			m.Text = cleanText()
+		} else {
+			m.Text = cleanText()
+			if m.Text == "" {
 				bad("empty", "Пустое сообщение.")
 			}
-			m.Text = t
 		}
 		m.ID = nextID("message")
 		db.Messages = append(db.Messages, m)
@@ -897,6 +1040,7 @@ func init() {
 		}
 		if n, k := toInt(c.body["upTo"]); k && n > row.LastRead {
 			row.LastRead = n
+			broadcastChat(id, map[string]any{"t": "read", "chatId": id, "userId": c.user.ID, "upTo": n}, c.user.ID)
 		}
 		return ok()
 	})
@@ -906,6 +1050,8 @@ func init() {
 		if m == nil || m.UserID != c.user.ID {
 			fail(404, "not_found", "Сообщение не найдено.")
 		}
+		rmFile(m.Image)
+		rmFile(m.Audio)
 		list := msgsBy[m.ChatID]
 		for i, x := range list {
 			if x.ID == id {
@@ -921,6 +1067,147 @@ func init() {
 		}
 		broadcastChat(m.ChatID, map[string]any{"t": "del", "chatId": m.ChatID, "id": id}, 0)
 		return ok()
+	})
+
+	route("GET", "/api/chats/:id/search", func(c *Ctx) any {
+		id := intParam(c.params["id"])
+		if !isMember(id, c.user.ID) {
+			fail(404, "not_found", "Чат не найден.")
+		}
+		q := strings.ToLower(clean(c.query.Get("q"), 60))
+		out := []*MsgView{}
+		if len([]rune(q)) >= 2 {
+			list := msgsBy[id]
+			for i := len(list) - 1; i >= 0 && len(out) < 50; i-- {
+				if list[i].Text != "" && strings.Contains(strings.ToLower(list[i].Text), q) {
+					out = append(out, msgView(list[i]))
+				}
+			}
+		}
+		return map[string]any{"messages": out}
+	})
+	route("PUT", "/api/chats/:id/prefs", func(c *Ctx) any {
+		id := intParam(c.params["id"])
+		row := memberRow(id, c.user.ID)
+		if row == nil {
+			fail(404, "not_found", "Чат не найден.")
+		}
+		if v, ok := c.body["pinned"].(bool); ok {
+			if v && !row.Pinned {
+				n := 0
+				for _, m := range db.Members {
+					if m.UserID == c.user.ID && m.Pinned {
+						n++
+					}
+				}
+				if n >= 5 {
+					bad("too_many_pins", "Можно закрепить не больше 5 чатов.")
+				}
+			}
+			row.Pinned = v
+		}
+		if v, ok := c.body["muted"].(bool); ok {
+			row.Muted = v
+		}
+		return map[string]any{"chat": chatView(id, c.user.ID)}
+	})
+	route("PATCH", "/api/chats/:id", func(c *Ctx) any {
+		id := intParam(c.params["id"])
+		ch := chatByID(id)
+		if ch == nil || ch.Type != "group" || ch.CreatedBy != c.user.ID {
+			fail(403, "forbidden", "Менять группу может её создатель.")
+		}
+		t := clean(c.body["title"], 60)
+		if t == "" {
+			bad("title_required", "Введите название группы.")
+		}
+		ch.Title = t
+		pushChat(id)
+		return map[string]any{"chat": chatView(id, c.user.ID)}
+	})
+	route("PUT", "/api/chats/:id/avatar", func(c *Ctx) any {
+		id := intParam(c.params["id"])
+		ch := chatByID(id)
+		if ch == nil || ch.Type != "group" || ch.CreatedBy != c.user.ID {
+			fail(403, "forbidden", "Менять группу может её создатель.")
+		}
+		f := saveImage(c.body["data"])
+		rmFile(ch.Avatar)
+		ch.Avatar = f
+		pushChat(id)
+		return map[string]any{"chat": chatView(id, c.user.ID)}
+	})
+	route("DELETE", "/api/chats/:id/avatar", func(c *Ctx) any {
+		id := intParam(c.params["id"])
+		ch := chatByID(id)
+		if ch == nil || ch.Type != "group" || ch.CreatedBy != c.user.ID {
+			fail(403, "forbidden", "Менять группу может её создатель.")
+		}
+		rmFile(ch.Avatar)
+		ch.Avatar = ""
+		pushChat(id)
+		return map[string]any{"chat": chatView(id, c.user.ID)}
+	})
+	route("PATCH", "/api/messages/:id", func(c *Ctx) any {
+		m := messageByID(intParam(c.params["id"]))
+		if m == nil || m.UserID != c.user.ID {
+			fail(404, "not_found", "Сообщение не найдено.")
+		}
+		if m.Kind != "text" && m.Kind != "image" {
+			bad("not_editable", "Это сообщение нельзя изменить.")
+		}
+		t := clean(c.body["text"], 2000)
+		if t == "" && m.Kind == "text" {
+			bad("empty", "Пустое сообщение.")
+		}
+		m.Text, m.EditedAt = t, now()
+		mv := msgView(m)
+		broadcastChat(m.ChatID, map[string]any{"t": "edit", "message": mv}, 0)
+		return map[string]any{"message": mv}
+	})
+	route("PUT", "/api/messages/:id/reaction", func(c *Ctx) any {
+		m := messageByID(intParam(c.params["id"]))
+		if m == nil || !isMember(m.ChatID, c.user.ID) {
+			fail(404, "not_found", "Сообщение не найдено.")
+		}
+		e := c.str("emoji")
+		allowed := false
+		for _, x := range []string{"👍", "❤️", "😂", "😮", "😢", "🔥", "👎", "🎉"} {
+			if x == e {
+				allowed = true
+			}
+		}
+		if !allowed {
+			bad("bad_reaction", "Такой реакции нет.")
+		}
+		limit("r:"+strconv.Itoa(c.user.ID), 120, 60e3)
+		if m.Reactions == nil {
+			m.Reactions = map[string][]int{}
+		}
+		// у человека только одна реакция на сообщение; повторное нажатие снимает её
+		had := false
+		for k, ids := range m.Reactions {
+			kept := ids[:0:0]
+			for _, id := range ids {
+				if id == c.user.ID {
+					if k == e {
+						had = true
+					}
+				} else {
+					kept = append(kept, id)
+				}
+			}
+			if len(kept) == 0 {
+				delete(m.Reactions, k)
+			} else {
+				m.Reactions[k] = kept
+			}
+		}
+		if !had {
+			m.Reactions[e] = append(m.Reactions[e], c.user.ID)
+		}
+		broadcastChat(m.ChatID, map[string]any{"t": "react", "chatId": m.ChatID, "id": m.ID, "reactions": m.Reactions}, 0)
+		return map[string]any{"reactions": m.Reactions}
 	})
 
 	/* смайлики */
@@ -996,6 +1283,12 @@ func contactView(c *Contact) map[string]any {
 		v["user"] = publicUser(u)
 	}
 	return v
+}
+func pushChat(id int) {
+	all := memberIDs(id)
+	for _, uid := range all {
+		sendTo(uid, map[string]any{"t": "chat", "chat": chatView(id, uid), "users": usersFor(all)})
+	}
 }
 func pushUser(u *User) {
 	for _, id := range peersOf(u.ID, true) {
@@ -1110,7 +1403,11 @@ func authRequest(c *Ctx) any {
 	if viaReal {
 		var err error
 		if kind == "email" {
-			err = smtpSend(target, "Код входа в Чат-Чат", text)
+			if brevoKey != "" {
+				err = brevoSend(target, "Код входа в Чат-Чат", text)
+			} else {
+				err = smtpSend(target, "Код входа в Чат-Чат", text)
+			}
 		} else {
 			err = twilioSend(target, text)
 		}

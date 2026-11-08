@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -106,4 +108,35 @@ func tlsCfg(host string) *tls.Config {
 		return smtpTLS
 	}
 	return &tls.Config{ServerName: host}
+}
+
+// brevoSend отправляет письмо через HTTP-API Brevo (бесплатно до 300 писем в день).
+// MAIL_FROM должен быть адресом, подтверждённым в Brevo.
+func brevoSend(to, subject, text string) error {
+	name, addr := "Чат-Чат", mailFrom
+	if m := regexp.MustCompile(`^\s*(.*?)\s*<([^>]+)>\s*$`).FindStringSubmatch(mailFrom); m != nil {
+		if m[1] != "" {
+			name = m[1]
+		}
+		addr = m[2]
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"sender":      map[string]string{"name": name, "email": addr},
+		"to":          []map[string]string{{"email": to}},
+		"subject":     subject,
+		"textContent": text,
+	})
+	req, _ := http.NewRequest("POST", "https://api.brevo.com/v3/smtp/email", bytes.NewReader(payload))
+	req.Header.Set("api-key", brevoKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("brevo %d", resp.StatusCode)
+	}
+	return nil
 }
