@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-//go:embed public
+//go:embed *.html *.js *.css *.webmanifest *.png *.svg *.woff
 var assets embed.FS
 
 var lastHit int64
@@ -48,7 +48,7 @@ func serverURL() string {
 
 var mimes = map[string]string{".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
 	".json": "application/json", ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
-	".webp": "image/webp", ".gif": "image/gif", ".ico": "image/x-icon", ".otf": "font/otf", ".ttf": "font/ttf", ".woff": "font/woff", ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8"}
+	".webp": "image/webp", ".gif": "image/gif", ".ico": "image/x-icon", ".otf": "font/otf", ".ttf": "font/ttf", ".woff": "font/woff", ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8", ".webm": "audio/webm", ".ogg": "audio/ogg", ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav"}
 
 func loadEnvFile(p string) {
 	b, err := os.ReadFile(p)
@@ -92,24 +92,27 @@ func router(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		b, err := os.ReadFile(filepath.Join(uploadDir, name))
+		f, err := os.Open(filepath.Join(uploadDir, name))
 		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
-		h.Set("Content-Type", mimes[strings.ToLower(path.Ext(name))])
+		defer f.Close()
+		st, _ := f.Stat()
+		ct := mimes[strings.ToLower(path.Ext(name))]
+		h.Set("Content-Type", ct)
 		h.Set("Cache-Control", "public, max-age=31536000, immutable")
-		_, _ = w.Write(b)
+		http.ServeContent(w, r, name, st.ModTime(), f)
 		return
 	}
 	rel := path.Clean("/" + p)
 	if rel == "/" {
 		rel = "/index.html"
 	}
-	b, err := fs.ReadFile(assets, "public"+rel)
+	b, err := fs.ReadFile(assets, path.Base(rel))
 	if err != nil {
 		rel = "/index.html"
-		b, err = fs.ReadFile(assets, "public/index.html")
+		b, err = fs.ReadFile(assets, "index.html")
 		if err != nil {
 			http.NotFound(w, r)
 			return
